@@ -1,0 +1,170 @@
+---
+title: "PSAT_TOPIC1_TEST"
+author: "시계열자료분석팀 강철석"
+date: "`r format(Sys.Date())`"
+output:
+  html_document:
+    df_print: paged
+    fig_height: 10
+    fig_width: 18
+    highlight: textmate
+    theme: united
+    toc: yes
+    toc_depth: 3
+    toc_float: yes
+    keep_md: true
+    number_sections: true
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(conflicted)
+conflict_prefer("filter", "dplyr")
+conflict_prefer("expand", "tidyr")
+conflict_prefer("collapse", "dplyr")
+library(dplyr)
+library(ggplot2)
+library(tidyverse)
+library(Matrix)
+library(nlme)
+library(lme4)
+library(glmmTMB)
+library(MASS)
+```
+
+# DR_GPS 유효성 입증
+
+```{r load}
+df_return <- read.csv("데이터/주제1_2_리턴프리.csv")
+df_return_gp <- read.csv("데이터/주제1_2_리턴프리_그룹화.csv")
+df_round <- read.csv("데이터/주제1_2_왕복.csv")
+df_round_gp <- read.csv("데이터/주제1_2_왕복_그룹화.csv")
+```
+
+```{r _}
+str(df_return)
+head(df_return)
+
+df_ <- df_return[c("Car_ID", "Start_date", "DR_GPS", "Spot_out")]
+str(df_)
+
+head(df_)
+
+model_return <- glmer(Spot_out ~ DR_GPS + (1 | Car_ID), 
+               data = df_return, 
+               family = binomial)
+summary(model_return)
+
+capture.output(summary(model_return), file = "model_summary_return.txt")
+
+
+model_round <- glmer(Spot_out ~ DR_GPS + (1 | Car_ID), 
+               data = df_round, 
+               family = binomial)
+capture.output(summary(model_round), file = "model_summary_round.txt")
+summary(model_round)
+```
+
+# Generlizaed Lienar Mixed Model 
+```{r glmmTMB_with_day}
+
+model_with_day <- function(data, output_file) {
+  library(glmmTMB)
+  
+  data$Day <- as.Date(data$Start_date)
+  
+  model <- glmmTMB(
+    Spot_out ~ DR_GPS + (1 | Car_ID) + (1 | Day),
+    data = data,
+    family = binomial
+  )
+  
+  intercept <- fixef(model)$cond["(Intercept)"]
+  dr_gps_coeff <- fixef(model)$cond["DR_GPS"]
+  
+  prob_no_gps <- 1 / (1 + exp(-(intercept)))
+  prob_with_gps <- 1 / (1 + exp(-(intercept + dr_gps_coeff)))
+  
+  summary_text <- capture.output(summary(model))
+  prob_text <- c(
+    "Calculated probabilities:",
+    paste("Spot-out probability (no DR_GPS):", round(prob_no_gps, 6)),
+    paste("Spot-out probability (DR_GPS):", round(prob_with_gps, 6))
+  )
+  
+  writeLines(c(summary_text, "", prob_text), output_file)
+  
+  return(model)
+}
+
+
+
+
+model_return <- model_with_day(df_return, output_file = "model_summary_tmb_return_day.txt")
+model_round <- model_with_day(df_round, output_file = "model_summary_tmb_round_day.txt")
+
+summary(model_return)
+summary(model_round)
+
+```
+
+```{r validation}
+# Validate probability from GLMM
+prob <- function(df_round){
+  p <- sum(df_round$Spot_out) / dim(df_round)[1]
+  df_rd_dr <- subset(df_round, DR_GPS==1)
+  df_rd_ndr <- subset(df_round, DR_GPS==0)
+  p1 <- sum(df_rd_dr$Spot_out) / dim(df_rd_dr)[1]
+  p0 <- sum(df_rd_ndr$Spot_out) / dim(df_rd_ndr)[1]
+  
+  return(list(Origin = p, DR = p1, NDR = p0))
+}
+
+prob(df_round)
+prob(df_return)
+
+
+```
+
+
+- 분산이 평균보다 크기 때문에 poisson 기각
+- Negative Binomial Regression 적용
+```{r poisson}
+mean(df_return_gp$Spot_out)
+var(df_return_gp$Spot_out)
+
+```
+
+
+# Negative Binomial Regression 
+## Return Free Car
+```{r NB_rf}
+glm_return <- glm.nb(Spot_out ~ offset(log(Total_count)) + factor(DR_GPS), data = df_return_gp)
+summary(glm_return)
+```
+
+## Round Car
+```{r NB_rd}
+glm_round <- glm.nb(Spot_out ~ offset(log((Total_count))) + factor(DR_GPS), data = df_round_gp)
+summary(glm_round)
+```
+
+# Zero Inflation Negative Binomial Regressions
+## Return Free Car
+```{r ZINB_rf}
+library(pscl)
+zinb_rf = zeroinfl(formula = Spot_out ~ offset(log(Total_count)) + factor(DR_GPS) | factor(DR_GPS), 
+         data = df_return_gp, dist = "negbin")
+
+summary(zinb_rf)
+```
+
+
+
+## Round Car
+```{r ZINB_rd}
+zinb_rd = zeroinfl(formula = Spot_out ~ offset(log(Total_count)) + factor(DR_GPS) | factor(DR_GPS), 
+         data = df_round_gp, dist = "negbin")
+
+summary(zinb_rd)
+```
